@@ -9,7 +9,7 @@ This is a simple proof-of-concept of a GUI machine learning application.
 # import GUI libraries
 #
 #import Qt application and widget base class
-from PyQt5.QtWidgets import QApplication, QWidget, QMainWindow
+from PyQt5.QtWidgets import QApplication, QWidget, QMainWindow, QDialog
 #import visual elements
 from PyQt5.QtWidgets import QPushButton, QLineEdit, QComboBox, QLabel, QTableWidget, QTableWidgetItem, QFileDialog #unused: QRadioButton, QStatusBar, QToolBar, 
 #import layout managers
@@ -24,7 +24,7 @@ from functools import partial #for controller
 import numpy as np
 import pandas as pd
 from sklearn.linear_model import LinearRegression, Ridge, Lasso, ElasticNet
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, KFold
 
 
 
@@ -231,6 +231,52 @@ class appGUI(QMainWindow):
         self.optiLayout.addWidget(self.magicButton, 0, 1)
         #add OptiLearn to the general layout
         self.generalLayout.addLayout(self.optiLayout, 3, 1)
+        #
+        #optiLearn results will be published via QDialog
+        self.optiMessage = QDialog()
+        self.optiMessage.setWindowTitle("optiLearn results")
+        self.optiMessageLayout = QGridLayout() #Dialog will have grid layout
+        #prepare widgets to be added to the dialog
+        self.optiMessageTitle = QLabel("<b>You have run automated machine learning feature.<\b>\nDetailed results:")
+        self.optiMessageR2Label = QLabel("Model R^2 on test set:")
+        self.optiMessageR2 = QLineEdit("NA")
+        self.optiMessageR2.setReadOnly(True)
+        self.optiMessageBICLabel = QLabel("Model BIC on test set:")
+        self.optiMessageBIC = QLineEdit("NA")
+        self.optiMessageBIC.setReadOnly(True)
+        self.optiMessageSelectedFeaturesLabel = QLabel("Selected predictive features (indices):")
+        self.optiMessageSelectedFeatures = QLineEdit("NA")
+        self.optiMessageSelectedFeatures.setReadOnly(True)
+        self.optiMessageParameterAlphaLabel = QLabel("Optimal value of parameter alpha:")
+        self.optiMessageParameterAlpha = QLineEdit("NA")
+        self.optiMessageParameterAlpha.setReadOnly(True)
+        self.optiMessageParameterL1Label = QLabel("Optimal value of parameter L1-ratio:")
+        self.optiMessageParameterL1 = QLineEdit("NA")
+        self.optiMessageParameterL1.setReadOnly(True)
+        self.optiMessageCoeffsLabel = QLabel("Learned coefficients")
+        self.optiMessageCoeffs = QLineEdit("NA")
+        self.optiMessageCoeffs.setReadOnly(True)
+        #OK button to close the dialog
+        self.optiMessageExit = QPushButton("OK")
+        self.optiMessageExit.clicked.connect(self.optiMessage.reject)
+        #add widgets to the dialog
+        self.optiMessageLayout.addWidget(self.optiMessageTitle, 0,0)
+        self.optiMessageLayout.addWidget(self.optiMessageR2Label, 1,0)
+        self.optiMessageLayout.addWidget(self.optiMessageR2, 1,1)
+        self.optiMessageLayout.addWidget(self.optiMessageBICLabel, 2,0)
+        self.optiMessageLayout.addWidget(self.optiMessageBIC, 2,1)
+        self.optiMessageLayout.addWidget(self.optiMessageSelectedFeaturesLabel, 3,0)
+        self.optiMessageLayout.addWidget(self.optiMessageSelectedFeatures, 3,1)
+        self.optiMessageLayout.addWidget(self.optiMessageParameterAlphaLabel, 4,0)
+        self.optiMessageLayout.addWidget(self.optiMessageParameterAlpha, 4,1)
+        self.optiMessageLayout.addWidget(self.optiMessageParameterL1Label, 5,0)
+        self.optiMessageLayout.addWidget(self.optiMessageParameterL1, 5,1)
+        self.optiMessageLayout.addWidget(self.optiMessageCoeffsLabel, 6,0)
+        self.optiMessageLayout.addWidget(self.optiMessageCoeffs, 6,1)
+        self.optiMessageLayout.addWidget(self.optiMessageExit, 7,1)
+        #add everything to the dialog layout
+        self.optiMessage.setLayout(self.optiMessageLayout)
+        
      
         
 #controller code
@@ -384,8 +430,33 @@ class Controller:
             self._view.alpha2.setText('.5')
             self._view.alpha2.setEnabled(True)
             
-    def _optiLearn(self):
-        self._MLmodel.optiLearn()
+    def _optiLearn(self):    
+        try:
+            # calculate optimal model and get all model parameters and scores
+            R2, BIC, selected_features, alpha, l1_ratio, learned_coeffs = self._MLmodel.optiLearn()
+            #prepare display of R^2, BIC, selected features, and model parameters
+            self._view.optiMessageR2.setText(f"{R2:.3f}")
+            self._view.optiMessageBIC.setText(f"{BIC:.3f}")
+            #list of selected features by name
+            feat_str = "{"
+            for index in selected_features:
+                feat_str += " "+self._view.table.horizontalHeaderItem(index).text()+","
+            feat_str = feat_str[:-1] + "}"
+            self._view.optiMessageSelectedFeatures.setText(feat_str)
+            #self._view.optiMessageSelectedFeatures.setText(str(selected_features))
+            self._view.optiMessageParameterAlpha.setText(f"{alpha:.4f}")
+            self._view.optiMessageParameterL1.setText(f"{l1_ratio:.4f}")
+            #prepare display of list of learned coefficients
+            coeff_str = "{"
+            for c in learned_coeffs:
+                coeff_str += " "+f"{c:.3f}"+","
+            coeff_str = coeff_str[:-1] + "}"
+            self._view.optiMessageCoeffs.setText(coeff_str)
+            self._view.optiMessage.exec_()
+        except:
+            print("something went wrong")
+            #self._view.optiMessage.exec_()
+        
 
     def _connectSignals(self):
         """ connect signals and slots """
@@ -503,8 +574,84 @@ class MLmodel:
     def modelQuality(self):
         return self.R2_train, self.R2_test, self.coeffs
     
+    def getBIC(self, model, X, y):
+        """
+        Returns Bayesian information criterion of a linear model. Takes scikit-learn model, list of features and target list.
+        """
+        # get sum of squared errors (sum of squares of absolute values of differences between prediction and true value)
+        SSE = np.sum(abs(model.predict(X)-y)**2)
+        # get parameters needed to calculate AIC
+        num_params = len(model.coef_) #number of parameters in the model
+        nrows = X.shape[0]
+        # calculate AIC
+        BIC = nrows * (np.log(2*np.pi) + np.log(SSE) - np.log(nrows)) + nrows + np.log(nrows)*num_params
+        return BIC
+    
     def optiLearn(self):
-        print(self.coeffs)
+        #get train, validation, and test set
+        #prepare features and targets
+        features = self.dataset[:,:-1]
+        targets  = self.dataset[:,-1]
+        #perform train-test-split to get train and test set
+        #train set will be further split into train and validation sets in k-fold cross-validation loop below
+        train_X, test_X, train_y, test_y = train_test_split(features, targets, test_size=.1)
+        #prepare k-fold cross-validation
+        num_splits = 5 #used to get average score across cross-validations
+        kfXvalidation = KFold(n_splits=num_splits)
+        # list of all features used by the model. for now it is all features, and will be reduced as features are dropped.
+        current_columns = [i for i in range(train_X.shape[1])]
+        current_X = train_X #this is the original training set, from which we drop columns as necessary
+        # keep track of the best score (and the best model) for given set of features
+        best_score = 10e6 #used to get the best model on a given set of features
+        best_score_improved = True
+        #enter feature-selection loop. feature dropout will be done in the end of the loop
+        while best_score_improved is True:
+            best_score_improved = False
+            #enter model-selection loops. in the outer-most two loops we loop over model parameters
+            #choose alpha parameter of ElasticNet regression. log-spaced values between 10^-3 and 1 will be attempted
+            for alpha in np.logspace(-3,0,30):
+                #choose l1_ratio parameter of ElasticNet regression. linearly-spaced values between 0.1  and 1 will be attempted
+                for l1_ratio in np.linspace(0.0101, 1, 30): # lower limit has to be >0.01, see doc
+                    model = ElasticNet(alpha=alpha, l1_ratio=l1_ratio)
+                    #run through k-fold cross-validation, produce train and validation sets, evaluate models
+                    cross_score = 0
+                    for train_index, valid_index in kfXvalidation.split(current_X):
+                        Xtrain, Xvalid = current_X[train_index], current_X[valid_index]
+                        ytrain, yvalid = train_y[train_index], train_y[valid_index]
+                        model.fit(Xtrain, ytrain) #fit model on new subset
+                        cross_score += self.getBIC(model,Xvalid,yvalid) #add up total model score
+                    #get average model score on cross-validation
+                    cross_score = cross_score/5
+                    #if best score is improved by current model, save current model
+                    #information criterion (AIC or BIC) should be minimized
+                    if cross_score<best_score:
+                        best_score = cross_score #update best score
+                        best_model = model
+                        chosen_features = current_columns
+                        best_score_improved = True
+            #at this point, the best model is known for the current dataset
+            #if it improved on the best model from the previous dataset then continue removing features
+            if best_score_improved:
+                #now drop the variable with smallest coefficient and repeat on reduced dataset
+                smallest_coeff_index = np.argmin(abs(best_model.coef_))
+                current_columns = [i for i in range(current_X.shape[1]) if i != smallest_coeff_index]
+                current_X = current_X[:, current_columns]
+            else:
+                break #no sense to keep on removing features, if removing the last one didn't improve results
+        #print details about the best model
+        #print(f"Best model is:\n\t{best_model}\n")
+        #print(f"Model k-fold cross-validation score is: BIC={best_score:.3f}")
+        #print(f"Selected features are: {chosen_features}")
+        #print(f"Coefficients are: {[f'{c:.3f}' for c in best_model.coef_]}")
+        #
+        #only reduced set of variables is used for scoring on test set
+        test_X = test_X[:, chosen_features]
+        #get BIC and R-squared
+        BIC = self.getBIC(best_model, test_X, test_y)
+        R2 = best_model.score(test_X,test_y)
+        #print test set results
+        print(f"On test set, model score is: BIC={BIC:.3f} and R^2={R2:.3f}.")
+        return R2, BIC, chosen_features, best_model.alpha, best_model.l1_ratio, best_model.coef_
 
 
 
